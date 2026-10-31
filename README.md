@@ -2,14 +2,20 @@
 
 A terminal graph of your Claude Code sessions and their forks.
 
-`/resume` shows sessions as a flat list. `arvre` shows them as a tree, so you can see which session was forked from which, when each one was last used, and jump between parents and children.
+`arvre` shows your Claude Code sessions and their forks as a tree. Navigate through them, resume sessions, see which session was forked from which,  and jump between parents and children.
 
-Example output (sample names):
+Example output (sample names, flowchart style):
 
 ```
-● Auth refactor  · 3h ago (2026-10-30 19:12)  · 2 children
-├─ ● try the other approach  · 1h ago (2026-10-30 21:02)  · ↑ Auth refactor
-└─ ● spike rename test  · 2m ago (2026-10-30 22:08)  · ↑ Auth refactor
+                                  ┌──────────────────────────┐
+                               ┌──│ Spike rename test        │
+┌──────────────────────────┐   │  │ 1m ago · no children     │
+│ Auth refactor            │───┤  └──────────────────────────┘
+│ 3h ago · 2 children      │   │
+└──────────────────────────┘   │  ┌──────────────────────────┐      ┌──────────────────────────┐
+                               └──│ Try the other approach   │──────│ Fix token refresh        │
+                                  │ 1h ago · 1 child         │      │ 30m ago · no children    │
+                                  └──────────────────────────┘      └──────────────────────────┘
 ```
 
 ## Install
@@ -17,7 +23,7 @@ Example output (sample names):
 With pipx (macOS and Linux, Python 3.11+):
 
 ```sh
-pipx install git+https://github.com/victorcarrico/arvre
+pipx install arvre
 ```
 
 You need Claude Code installed, with `claude` on your `PATH`, for the "open in this terminal" action.
