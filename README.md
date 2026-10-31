@@ -14,14 +14,7 @@ Example output (sample names):
 
 ## Install
 
-Homebrew (macOS and Linux):
-
-```sh
-brew tap victorcarrico/arvre
-brew install arvre
-```
-
-pipx (any platform with Python 3.11+):
+With pipx (macOS and Linux, Python 3.11+):
 
 ```sh
 pipx install git+https://github.com/victorcarrico/arvre
