@@ -11,6 +11,10 @@ OTHER = "aaaaaaaa-0000-0000-0000-000000000003"
 
 
 def make_app(projects_root, **kwargs):
+    # The tests start from the compact, last-24h, this-dir view unless they say otherwise.
+    kwargs.setdefault("window_24h", True)
+    kwargs.setdefault("all_projects", False)
+    kwargs.setdefault("style", "compact")
     return ArvreApp(cwd=CWD, root=projects_root, **kwargs)
 
 
@@ -132,3 +136,14 @@ async def test_click_on_flowchart_box_selects_it(projects_root):
         await pilot.click(GraphView, offset=(box.x + 3, box.y + 1))
         await pilot.pause()
         assert graph.selected_id == FORK
+
+
+@pytest.mark.asyncio
+async def test_defaults_are_flow_all_projects_all_time(projects_root):
+    app = ArvreApp(cwd=CWD, root=projects_root)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.style_name == "flow"
+        assert app.all_projects is True
+        assert app.window_24h is False
+        assert set(graph_ids(app)) == {ROOT, FORK, OTHER}

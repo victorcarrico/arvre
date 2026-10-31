@@ -80,9 +80,9 @@ class ArvreApp(App):
         self,
         cwd: str,
         root: Path = DEFAULT_ROOT,
-        window_24h: bool = True,
-        all_projects: bool = False,
-        style: str = "compact",
+        window_24h: bool = False,
+        all_projects: bool = True,
+        style: str = "flow",
         theme: str = "classic",
     ) -> None:
         super().__init__()

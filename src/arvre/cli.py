@@ -19,13 +19,13 @@ def main(argv: list[str] | None = None) -> None:
         description="Show Claude Code sessions and their forks as a graph.",
     )
     parser.add_argument("--dir", default=os.getcwd(), help="project directory to show (default: current)")
-    parser.add_argument("--all-projects", action="store_true", help="start with sessions from every project")
-    parser.add_argument("--all-time", action="store_true", help="start with all sessions, not only the last 24h")
+    parser.add_argument("--this-dir", action="store_true", help="start with only the current directory's sessions")
+    parser.add_argument("--last-day", action="store_true", help="start with only sessions from the last 24 hours")
     parser.add_argument(
         "--style",
         choices=["compact", "flow"],
-        default="compact",
-        help="tree style to start with (default: compact)",
+        default="flow",
+        help="tree style to start with (default: flow)",
     )
     parser.add_argument(
         "--theme",
@@ -43,8 +43,8 @@ def main(argv: list[str] | None = None) -> None:
     ArvreApp(
         cwd=cwd,
         root=DEFAULT_ROOT,
-        window_24h=not args.all_time,
-        all_projects=args.all_projects,
+        window_24h=args.last_day,
+        all_projects=not args.this_dir,
         style=args.style,
         theme=args.theme,
     ).run()
@@ -54,7 +54,7 @@ def print_graph(cwd: str, args: argparse.Namespace) -> None:
     now = datetime.now(timezone.utc)
     sessions = discover(DEFAULT_ROOT)
     link_forks(sessions)
-    visible = visible_ids(sessions, now, not args.all_time, args.all_projects, cwd)
+    visible = visible_ids(sessions, now, args.last_day, not args.this_dir, cwd)
     for row in build_rows(sessions, tree_members(sessions, visible)):
         print(row_label(row, sessions, now))
 

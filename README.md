@@ -31,10 +31,10 @@ You need Claude Code installed, with `claude` on your `PATH`, for the "open in t
 ## Usage
 
 ```sh
-arvre                      # sessions from the current directory, last 24 hours
-arvre --all-time           # all sessions, not just the last 24 hours
-arvre --all-projects       # sessions from every project
-arvre --style flow         # start with the left-to-right flowchart
+arvre                      # all sessions from every project, as a flowchart
+arvre --this-dir           # only sessions from the current directory
+arvre --last-day           # only sessions from the last 24 hours
+arvre --style compact      # start with the compact tree instead
 arvre --theme ocean        # start with a colour theme
 arvre --print              # print the tree as text and exit
 ```
