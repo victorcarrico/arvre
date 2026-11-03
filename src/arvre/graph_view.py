@@ -10,9 +10,10 @@ from textual import events
 from textual.binding import Binding
 from textual.geometry import Region
 from textual.message import Message
+from textual.strip import Strip
 from textual.widget import Widget
 
-from arvre.flowchart import BOX_H, BOX_W, FlowLayout, flow_layout, flow_text
+from arvre.flowchart import BOX_H, BOX_W, FlowLayout, flow_layout, flow_row
 from arvre.layout import Row, row_label, row_segments
 from arvre.scanner import Session
 from arvre.themes import THEMES, Theme
@@ -100,12 +101,15 @@ class GraphView(Widget, can_focus=True):
         self.post_message(self.Highlighted(self.selected_id))
 
     def _reveal(self) -> None:
+        # This widget is not a scroll container itself: the ScrollableContainer it sits in
+        # does the scrolling. The graph starts at the container's origin, so its
+        # coordinates are the container's coordinates.
         if self._flow:
             box = self._flow.boxes[self.selected_id]
             region = Region(box.x, box.y, BOX_W, BOX_H)
         else:
-            region = Region(0, self._index, 1, 1)
-        self.scroll_to_region(region, animate=False)
+            region = Region(0, self._index, self.size.width or 1, 1)
+        self.parent.scroll_to_region(region, animate=False)
 
     def _index_at(self, x: int, y: int) -> int | None:
         if self._flow:
@@ -118,19 +122,29 @@ class GraphView(Widget, can_focus=True):
 
     # --- rendering ----------------------------------------------------------
 
-    def render(self) -> Text:
-        if not self.rows:
-            return Text("")
+    def _line(self, y: int) -> Text:
         if self._flow:
-            return flow_text(self._flow, self.sessions, self.now, self.selected_id, self.theme)
-        lines = []
-        for i, row in enumerate(self.rows):
-            selected = i == self._index
-            line = Text(no_wrap=True)
-            for segment, role in row_segments(row, self.sessions, self.now):
-                line.append(segment, style=self.theme.style(role, selected))
-            lines.append(line)
-        return Text("\n").join(lines)
+            if y >= self._flow.height:
+                return Text("")
+            return flow_row(self._flow, y, self.sessions, self.now, self.selected_id, self.theme)
+        if y >= len(self.rows):
+            return Text("")
+        line = Text(no_wrap=True)
+        selected = y == self._index
+        for segment, role in row_segments(self.rows[y], self.sessions, self.now):
+            line.append(segment, style=self.theme.style(role, selected))
+        return line
+
+    def render_line(self, y: int) -> Strip:
+        # Textual asks for the visible rows only. Drawing each row on demand keeps a
+        # keypress cheap no matter how many sessions there are.
+        text = self._line(y)
+        return Strip(list(text.render(self.app.console, end="")), text.cell_len)
+
+    def plain_text(self) -> str:
+        """The whole chart as plain text (used by tests and debugging)."""
+        height = self._flow.height if self._flow else len(self.rows)
+        return "\n".join(self._line(y).plain for y in range(height))
 
     # --- keyboard -----------------------------------------------------------
 

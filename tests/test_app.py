@@ -66,7 +66,7 @@ async def test_style_toggle_switches_to_flowchart(projects_root):
         await pilot.pause()
         graph = app.query_one(GraphView)
         assert graph.style_name == "flow"
-        drawn = graph.render().plain
+        drawn = graph.plain_text()
         assert "Auth refactor" in drawn
         assert "┐" in drawn or "└" in drawn
 
@@ -147,3 +147,33 @@ async def test_defaults_are_flow_all_projects_all_time(projects_root):
         assert app.all_projects is True
         assert app.window_24h is False
         assert set(graph_ids(app)) == {ROOT, FORK, OTHER}
+
+
+def write_many(root, count):
+    """`count` independent sessions, all recent, so every one is a top-level row."""
+    from conftest import message, write_session
+
+    for i in range(count):
+        session_id = f"bbbbbbbb-0000-0000-0000-{i:012d}"
+        write_session(root, session_id, [message(f"m{i}a", 0.5), message(f"m{i}b", 0.4, kind="assistant")])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("style", ["compact", "flow"])
+async def test_navigating_down_scrolls_the_view(projects_root, style):
+    write_many(projects_root, 150)
+    app = ArvreApp(cwd=CWD, root=projects_root, window_24h=False, all_projects=True, style=style)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        graph = app.query_one(GraphView)
+        container = app.query_one("#scroll")
+        for _ in range(80):
+            await pilot.press("down")
+        await pilot.pause()
+        assert container.scroll_y > 0
+        if style == "flow":
+            box = graph._flow.boxes[graph.selected_id]
+            top, bottom = box.y, box.y + 4
+        else:
+            top, bottom = graph._index, graph._index + 1
+        assert container.scroll_y <= top and bottom <= container.scroll_y + container.size.height

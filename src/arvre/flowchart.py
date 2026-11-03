@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from rich.text import Text
@@ -46,9 +46,12 @@ class Box:
 @dataclass
 class FlowLayout:
     boxes: dict[str, Box]
-    masks: list[list[int]]  # direction bits per cell, turned into line chars when drawn
-    width: int
-    height: int
+    # Only the cells that carry a line are stored: row -> {x: direction bits}.
+    lines: dict[int, dict[int, int]] = field(default_factory=dict)
+    # Row -> boxes that cover that row, so drawing a row only touches nearby boxes.
+    box_rows: dict[int, list[Box]] = field(default_factory=dict)
+    width: int = 0
+    height: int = 0
 
 
 def flow_layout(rows: list[Row]) -> FlowLayout:
@@ -79,11 +82,16 @@ def flow_layout(rows: list[Row]) -> FlowLayout:
 
     boxes = {sid: Box(sid, depth[sid] * (BOX_W + GAP_X), y) for sid, y in ys.items()}
     if not boxes:
-        return FlowLayout({}, [], 0, 0)
+        return FlowLayout({})
 
-    width = max(box.x for box in boxes.values()) + BOX_W
-    height = max(box.y for box in boxes.values()) + BOX_H
-    masks = [[0] * width for _ in range(height)]
+    layout = FlowLayout(
+        boxes=boxes,
+        width=max(box.x for box in boxes.values()) + BOX_W,
+        height=max(box.y for box in boxes.values()) + BOX_H,
+    )
+    for box in boxes.values():
+        for dy in range(BOX_H):
+            layout.box_rows.setdefault(box.y + dy, []).append(box)
 
     for parent_id, child_ids in kids.items():
         parent = boxes[parent_id]
@@ -94,56 +102,61 @@ def flow_layout(rows: list[Row]) -> FlowLayout:
             child = boxes[child_id]
             enter_y = child.y + 1
             enter_x = child.x - 1
-            _horizontal(masks, exit_y, exit_x, bend_x)
-            _vertical(masks, bend_x, exit_y, enter_y)
-            _horizontal(masks, enter_y, bend_x, enter_x)
+            _horizontal(layout.lines, exit_y, exit_x, bend_x)
+            _vertical(layout.lines, bend_x, exit_y, enter_y)
+            _horizontal(layout.lines, enter_y, bend_x, enter_x)
 
-    return FlowLayout(boxes, masks, width, height)
+    return layout
 
 
-def _horizontal(masks: list[list[int]], y: int, x1: int, x2: int) -> None:
-    masks[y][x1] |= RIGHT
-    masks[y][x2] |= LEFT
+def _mark(lines: dict[int, dict[int, int]], x: int, y: int, bits: int) -> None:
+    row = lines.setdefault(y, {})
+    row[x] = row.get(x, 0) | bits
+
+
+def _horizontal(lines: dict[int, dict[int, int]], y: int, x1: int, x2: int) -> None:
+    _mark(lines, x1, y, RIGHT)
+    _mark(lines, x2, y, LEFT)
     for x in range(x1 + 1, x2):
-        masks[y][x] |= LEFT | RIGHT
+        _mark(lines, x, y, LEFT | RIGHT)
 
 
-def _vertical(masks: list[list[int]], x: int, y1: int, y2: int) -> None:
+def _vertical(lines: dict[int, dict[int, int]], x: int, y1: int, y2: int) -> None:
     if y1 == y2:
         return
     top, bottom = sorted((y1, y2))
-    masks[top][x] |= DOWN
-    masks[bottom][x] |= UP
+    _mark(lines, x, top, DOWN)
+    _mark(lines, x, bottom, UP)
     for y in range(top + 1, bottom):
-        masks[y][x] |= UP | DOWN
+        _mark(lines, x, y, UP | DOWN)
 
 
-def flow_text(
+def flow_row(
     layout: FlowLayout,
+    y: int,
     sessions: dict[str, Session],
     now: datetime,
     selected: str | None,
     theme: Theme,
 ) -> Text:
-    grid: list[list[tuple[str, str]]] = [
-        [(LINE_CHARS.get(mask, "┼") if mask else " ", theme.style("connector") if mask else "") for mask in row]
-        for row in layout.masks
-    ]
-    for box in layout.boxes.values():
-        _draw_box(grid, box, sessions[box.sid], now, theme, box.sid == selected)
+    """Draw one row of the chart. Cost depends on the row width, not the whole chart."""
+    cells: list[tuple[str, str]] = [(" ", "")] * layout.width
+    connector = theme.style("connector")
+    for x, bits in layout.lines.get(y, {}).items():
+        cells[x] = (LINE_CHARS.get(bits, "┼"), connector)
+    for box in layout.box_rows.get(y, ()):
+        _draw_box_row(cells, box, y - box.y, sessions[box.sid], now, theme, box.sid == selected)
 
     text = Text(no_wrap=True)
-    for y, row in enumerate(grid):
-        for char, style in row:
-            text.append(char, style=style)
-        if y < len(grid) - 1:
-            text.append("\n")
+    for char, style in cells:
+        text.append(char, style=style)
     return text
 
 
-def _draw_box(
-    grid: list[list[tuple[str, str]]],
+def _draw_box_row(
+    cells: list[tuple[str, str]],
     box: Box,
+    dy: int,
     session: Session,
     now: datetime,
     theme: Theme,
@@ -152,17 +165,16 @@ def _draw_box(
     inner = BOX_W - 2
     name = _fit(session.name, inner - 2)
     stats = _fit(f"{format_age(now, session.last_ts)} · {_children(session)}", inner - 2)
-    lines = [
-        ("┌" + "─" * inner + "┐", "border"),
-        ("│ " + name.ljust(inner - 2) + " │", "name"),
-        ("│ " + stats.ljust(inner - 2) + " │", "meta"),
-        ("└" + "─" * inner + "┘", "border"),
-    ]
-    for dy, (line, role) in enumerate(lines):
-        for dx, char in enumerate(line):
-            frame = dy in (0, 3) or dx in (0, BOX_W - 1) or char == " "
-            cell_role = "border" if frame else role
-            grid[box.y + dy][box.x + dx] = (char, theme.style(cell_role, selected))
+    line, role = {
+        0: ("┌" + "─" * inner + "┐", "border"),
+        1: ("│ " + name.ljust(inner - 2) + " │", "name"),
+        2: ("│ " + stats.ljust(inner - 2) + " │", "meta"),
+        3: ("└" + "─" * inner + "┘", "border"),
+    }[dy]
+    for dx, char in enumerate(line):
+        frame = dy in (0, 3) or dx in (0, BOX_W - 1) or char == " "
+        cell_role = "border" if frame else role
+        cells[box.x + dx] = (char, theme.style(cell_role, selected))
 
 
 def _children(session: Session) -> str:
