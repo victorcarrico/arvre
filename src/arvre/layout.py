@@ -16,6 +16,7 @@ class Row:
     session: Session
     prefix: str
     depth: int
+    archived: bool = False
 
 
 def visible_ids(
@@ -52,12 +53,26 @@ def tree_members(sessions: dict[str, Session], visible: set[str]) -> set[str]:
     return members
 
 
-def build_rows(sessions: dict[str, Session], shown: set[str]) -> list[Row]:
+def _effective_parent(sessions: dict[str, Session], sid: str, shown: set[str]) -> str | None:
+    """Walks up past any ancestor that archiving removed from `shown`, so a
+    node's children stay nested under the nearest ancestor still on screen
+    instead of scattering to the top level."""
+    parent = sessions[sid].parent_id
+    while parent is not None and parent not in shown:
+        parent = sessions[parent].parent_id
+    return parent
+
+
+def build_rows(
+    sessions: dict[str, Session],
+    shown: set[str],
+    archived: frozenset[str] = frozenset(),
+) -> list[Row]:
     children: dict[str, list[str]] = defaultdict(list)
     roots: list[str] = []
     for sid in shown:
-        parent = sessions[sid].parent_id
-        if parent in shown:
+        parent = _effective_parent(sessions, sid, shown)
+        if parent is not None:
             children[parent].append(sid)
         else:
             roots.append(sid)
@@ -68,7 +83,7 @@ def build_rows(sessions: dict[str, Session], shown: set[str]) -> list[Row]:
     rows: list[Row] = []
 
     def walk(sid: str, prefix: str, child_base: str, depth: int) -> None:
-        rows.append(Row(sessions[sid], prefix, depth))
+        rows.append(Row(sessions[sid], prefix, depth, archived=sid in archived))
         kids = newest_first(children[sid])
         for i, kid in enumerate(kids):
             last = i == len(kids) - 1
@@ -95,6 +110,14 @@ def format_age(now: datetime, then: datetime) -> str:
     return f"{seconds // 86400}d ago"
 
 
+def inherited_name(session: Session, sessions: dict[str, Session]) -> bool:
+    """True if this session still carries its parent's name -- the common
+    case right after a fork, before Claude gives it (or the user gives it)
+    its own title. Shown with a small marker so same-named siblings in the
+    graph are still easy to tell apart."""
+    return bool(session.parent_id) and sessions[session.parent_id].name == session.name
+
+
 def row_segments(row: Row, sessions: dict[str, Session], now: datetime) -> list[tuple[str, str]]:
     """The compact row as (text, role) pairs; roles are styled by the theme."""
     s = row.session
@@ -105,8 +128,13 @@ def row_segments(row: Row, sessions: dict[str, Session], now: datetime) -> list[
     if s.child_ids:
         count = len(s.child_ids)
         meta.append(f"{count} {'child' if count == 1 else 'children'}")
+    if row.archived:
+        meta.append("archived")
 
-    segments = [(row.prefix, "connector"), ("● ", "bullet"), (s.name, "name")]
+    bullet = "○ " if row.archived else "● "
+    segments = [(row.prefix, "connector"), (bullet, "bullet"), (s.name, "name")]
+    if inherited_name(s, sessions):
+        segments.append((" ⑂", "meta"))
     for text in meta:
         segments.append(("  · ", "meta"))
         segments.append((text, "meta"))

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 DEFAULT_ROOT = Path.home() / ".claude" / "projects"
 MESSAGE_TYPES = {"user", "assistant"}
+
+# Message uuids are only ever compared to each other (fork detection), never
+# shown, so a short prefix is enough and keeps the on-disk cache small. See
+# docs/plan-0.3.md: zero collisions across ~34k real uuids at this length.
+UUID_PREFIX_LEN = 12
 
 
 @dataclass
@@ -40,8 +44,30 @@ def last_field(records: list[dict], key: str, record_type: str | None = None) ->
     return ""
 
 
-def display_name(records: list[dict], session_id: str) -> str:
-    """Same priority as /resume: custom title, AI title, last prompt, short id."""
+def title_sidecar_path(session_path: Path) -> Path:
+    """Claude Code writes a rename here, alongside the custom-title record in
+    the JSONL itself. Both agree today; see docs/plan-0.3.md."""
+    return session_path.parent / session_path.stem / "custom-title.json"
+
+
+def read_title_sidecar(session_path: Path) -> tuple[str, int]:
+    """(title, mtime_ns); ("", 0) if the sidecar is absent or unreadable."""
+    sidecar = title_sidecar_path(session_path)
+    try:
+        stat = sidecar.stat()
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "", 0
+    return str(data.get("customTitle") or ""), stat.st_mtime_ns
+
+
+def display_name(records: list[dict], session_id: str, sidecar_title: str = "") -> str:
+    """Highest to lowest priority: the title sidecar, the custom-title record,
+    the AI title, the last prompt, the short id. Same order /resume uses,
+    plus the sidecar, which is read first because it is the most likely to
+    stay in sync with a rename (docs/plan-0.3.md)."""
+    if sidecar_title:
+        return sidecar_title
     custom = last_field(records, "customTitle", "custom-title")
     if custom:
         return custom
@@ -54,7 +80,7 @@ def display_name(records: list[dict], session_id: str) -> str:
     return session_id[:8]
 
 
-def parse_session(path: Path) -> Session | None:
+def parse_session(path: Path, sidecar_title: str = "") -> Session | None:
     records: list[dict] = []
     with path.open(encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -78,36 +104,42 @@ def parse_session(path: Path) -> Session | None:
         id=session_id,
         path=path,
         cwd=next((r["cwd"] for r in records if r.get("cwd")), ""),
-        name=display_name(records, session_id),
+        name=display_name(records, session_id, sidecar_title),
         first_ts=min(stamps),
         last_ts=max(stamps),
         branch=last_field(messages, "gitBranch"),
         created=getattr(stat, "st_birthtime", stat.st_ctime),
-        uuids=frozenset(r["uuid"] for r in messages if r.get("uuid")),
+        uuids=frozenset(r["uuid"][:UUID_PREFIX_LEN] for r in messages if r.get("uuid")),
     )
 
 
-def discover(root: Path = DEFAULT_ROOT, cache: dict | None = None) -> dict[str, Session]:
-    """Parse every session under root. `cache` maps path -> (mtime, size, Session)."""
+def discover(root: Path = DEFAULT_ROOT, cache: "ScanCache | None" = None) -> dict[str, Session]:
+    """Parse every session under root, using `cache` to skip unchanged files.
+
+    A cache hit costs one stat() of the session file and one of its (usually
+    absent) title sidecar -- no file content is read. See arvre.cache and
+    docs/plan-0.3.md for the measured effect (2.8s -> ~6ms on 300 sessions).
+    """
+    from arvre.cache import MISS, ScanCache  # local import: cache.py imports Session from here
+
     sessions: dict[str, Session] = {}
     if not root.is_dir():
         return sessions
-    cache = {} if cache is None else cache
+    cache = cache if cache is not None else ScanCache()
     for path in root.glob("*/*.jsonl"):
         try:
             stat = path.stat()
         except OSError:
             continue
-        key = (stat.st_mtime_ns, stat.st_size)
-        cached = cache.get(path)
-        if cached and cached[0] == key:
-            session = cached[1]
-        else:
+        title, title_mtime_ns = read_title_sidecar(path)
+        path_str = str(path)
+        session = cache.lookup(path_str, stat.st_mtime_ns, stat.st_size, title_mtime_ns)
+        if session is MISS:
             try:
-                session = parse_session(path)
+                session = parse_session(path, sidecar_title=title)
             except OSError:
                 session = None
-            cache[path] = (key, session)
+            cache.store(path_str, stat.st_mtime_ns, stat.st_size, title_mtime_ns, session)
         if session:
             sessions[session.id] = session
     return sessions

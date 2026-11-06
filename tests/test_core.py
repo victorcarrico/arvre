@@ -1,11 +1,11 @@
 from datetime import timedelta
 
-from conftest import CWD, NOW, message, write_session
+from conftest import CWD, NOW, message, write_session, write_title_sidecar
 
 from arvre.commands import resume_command
 from arvre.flowchart import BOX_H, BOX_W, flow_layout
 from arvre.forks import link_forks
-from arvre.layout import build_rows, format_age, row_label, tree_members, visible_ids
+from arvre.layout import build_rows, format_age, inherited_name, row_label, tree_members, visible_ids
 from arvre.scanner import Session, discover
 
 ROOT = "aaaaaaaa-0000-0000-0000-000000000001"
@@ -110,6 +110,54 @@ def test_format_age():
     assert format_age(NOW, NOW - timedelta(minutes=5)) == "5m ago"
     assert format_age(NOW, NOW - timedelta(hours=2)) == "2h ago"
     assert format_age(NOW, NOW - timedelta(days=3)) == "3d ago"
+
+
+def test_title_sidecar_outranks_the_custom_title_record(projects_root):
+    write_title_sidecar(projects_root, ROOT, "Renamed via sidecar")
+    sessions = load(projects_root)
+    assert sessions[ROOT].name == "Renamed via sidecar"
+
+
+def test_archiving_hides_a_node_but_its_forks_stay_and_reconnect(projects_root):
+    sessions = load(projects_root)
+    grandfork = "aaaaaaaa-0000-0000-0000-000000000009"
+    write_session(
+        projects_root,
+        grandfork,
+        [message("u1", 3.2), message("u2", 3.1, kind="assistant"), message("u3", 1.0), message("u9", 0.5)],
+    )
+    sessions = load(projects_root)
+    assert sessions[grandfork].parent_id == FORK  # same chain as test_fork_of_fork_chains_to_nearest_ancestor
+
+    # Archiving FORK (the middle node) hides only FORK; grandfork is still
+    # shown, now nested directly under ROOT instead of disappearing or
+    # becoming a stray root.
+    shown = {ROOT, grandfork}  # what app.py computes as tree_members(...) - archived
+    rows = build_rows(sessions, shown, frozenset({FORK}))
+    assert [r.session.id for r in rows] == [ROOT, grandfork]
+    assert rows[1].prefix == "└─ "
+
+
+def test_build_rows_marks_archived_rows_even_when_shown_anyway(projects_root):
+    sessions = load(projects_root)
+    rows = build_rows(sessions, {ROOT, FORK}, frozenset({FORK}))
+    assert next(r for r in rows if r.session.id == FORK).archived is True
+    assert next(r for r in rows if r.session.id == ROOT).archived is False
+
+    label = row_label(next(r for r in rows if r.session.id == FORK), sessions, NOW)
+    assert "archived" in label
+
+
+def test_inherited_name_marker_shown_only_when_names_match(projects_root):
+    sessions = load(projects_root)
+    assert inherited_name(sessions[FORK], sessions) is False  # "try the other approach" != "Auth refactor"
+    assert "⑂" not in row_label(build_rows(sessions, {ROOT, FORK})[1], sessions, NOW)
+
+    # The common case right after a real fork: the child still carries its
+    # parent's name until Claude (or the user) gives it its own.
+    sessions[FORK].name = sessions[ROOT].name
+    assert inherited_name(sessions[FORK], sessions) is True
+    assert "⑂" in row_label(build_rows(sessions, {ROOT, FORK})[1], sessions, NOW)
 
 
 def test_resume_command_quotes_directory():

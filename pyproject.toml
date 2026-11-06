@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arvre"
-version = "0.2.1"
+version = "0.3.0a1"
 description = "Terminal graph of Claude Code sessions and their forks"
 readme = "README.md"
 license = "MIT"

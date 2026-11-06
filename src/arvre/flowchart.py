@@ -7,7 +7,7 @@ from datetime import datetime
 
 from rich.text import Text
 
-from arvre.layout import Row, format_age
+from arvre.layout import Row, format_age, inherited_name
 from arvre.scanner import Session
 from arvre.themes import Theme
 
@@ -41,6 +41,7 @@ class Box:
     sid: str
     x: int
     y: int
+    archived: bool = False
 
 
 @dataclass
@@ -80,7 +81,11 @@ def flow_layout(rows: list[Row]) -> FlowLayout:
         if row.depth == 0:
             place(row.session.id)
 
-    boxes = {sid: Box(sid, depth[sid] * (BOX_W + GAP_X), y) for sid, y in ys.items()}
+    archived = {row.session.id: row.archived for row in rows}
+    boxes = {
+        sid: Box(sid, depth[sid] * (BOX_W + GAP_X), y, archived=archived.get(sid, False))
+        for sid, y in ys.items()
+    }
     if not boxes:
         return FlowLayout({})
 
@@ -145,7 +150,11 @@ def flow_row(
     for x, bits in layout.lines.get(y, {}).items():
         cells[x] = (LINE_CHARS.get(bits, "┼"), connector)
     for box in layout.box_rows.get(y, ()):
-        _draw_box_row(cells, box, y - box.y, sessions[box.sid], now, theme, box.sid == selected)
+        session = sessions[box.sid]
+        _draw_box_row(
+            cells, box, y - box.y, session, now, theme,
+            selected=box.sid == selected, inherited=inherited_name(session, sessions),
+        )
 
     text = Text(no_wrap=True)
     for char, style in cells:
@@ -161,10 +170,17 @@ def _draw_box_row(
     now: datetime,
     theme: Theme,
     selected: bool,
+    inherited: bool,
 ) -> None:
     inner = BOX_W - 2
-    name = _fit(session.name, inner - 2)
-    stats = _fit(f"{format_age(now, session.last_ts)} · {_children(session)}", inner - 2)
+    label = session.name + (" ⑂" if inherited else "")
+    if box.archived:
+        label = "○ " + label
+    name = _fit(label, inner - 2)
+    stats_text = f"{format_age(now, session.last_ts)} · {_children(session)}"
+    if box.archived:
+        stats_text += " · archived"
+    stats = _fit(stats_text, inner - 2)
     line, role = {
         0: ("┌" + "─" * inner + "┐", "border"),
         1: ("│ " + name.ljust(inner - 2) + " │", "name"),

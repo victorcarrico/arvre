@@ -13,10 +13,22 @@ def stamp(hours_ago: float) -> str:
     return (NOW - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+def fake_uuid(tag: str) -> str:
+    """A short, distinct tag padded out to a realistic 36-char uuid shape.
+
+    arvre.scanner truncates every message uuid to 12 chars (it only ever
+    compares them for fork detection) and arvre.cache's on-disk encoding
+    assumes that fixed width. Real Claude Code uuids are always full 36-char
+    uuids, so this keeps the fixtures faithful to that rather than exercising
+    an input shape that can't occur in practice.
+    """
+    return f"{tag}-0000-0000-0000-000000000000"
+
+
 def message(uuid: str, hours_ago: float, kind: str = "user", **extra) -> dict:
     return {
         "type": kind,
-        "uuid": uuid,
+        "uuid": fake_uuid(uuid),
         "timestamp": stamp(hours_ago),
         "cwd": CWD,
         "gitBranch": "main",
@@ -30,6 +42,14 @@ def write_session(root: Path, session_id: str, records: list[dict]) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{session_id}.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return path
+
+
+def write_title_sidecar(root: Path, session_id: str, title: str) -> Path:
+    folder = root / PROJECT_DIR / session_id
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "custom-title.json"
+    path.write_text(json.dumps({"customTitle": title}), encoding="utf-8")
     return path
 
 

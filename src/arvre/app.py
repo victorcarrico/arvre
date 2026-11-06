@@ -18,22 +18,26 @@ from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList, Static
 from textual.widgets.option_list import Option
 
-from arvre.commands import resume_command
+from arvre.cache import ScanCache
+from arvre.commands import fork_argv, new_session_argv, new_session_id, resume_argv, resume_command
 from arvre.forks import link_forks
 from arvre.graph_view import GraphView
 from arvre.layout import build_rows, tree_members, visible_ids
 from arvre.scanner import DEFAULT_ROOT, Session, discover
+from arvre.state import ArvreState
 from arvre.themes import THEME_ORDER, THEMES, Theme
 
 
 class ActionModal(ModalScreen[str | None]):
-    """Choose what to do with a session. Dismisses with "open", "copy" or None."""
+    """Choose what to do with a session. Dismisses with the chosen action id,
+    or None if closed without choosing."""
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, archived: bool) -> None:
         super().__init__()
         self.session = session
+        self.archived = archived
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal"):
@@ -41,6 +45,9 @@ class ActionModal(ModalScreen[str | None]):
             yield Static(f"{self.session.id}\n{self.session.cwd}", id="modal-meta")
             yield OptionList(
                 Option("Open in this terminal", id="open"),
+                Option("Fork this session", id="fork"),
+                Option("New session here", id="new"),
+                Option("Unarchive" if self.archived else "Archive", id="archive"),
                 Option("Copy command", id="copy"),
                 id="modal-actions",
             )
@@ -74,16 +81,25 @@ class ArvreApp(App):
         Binding("p", "toggle_scope", "this dir / all"),
         Binding("v", "toggle_style", "compact / flow"),
         Binding("t", "toggle_theme", "theme"),
+        Binding("f", "fork_selected", "fork"),
+        Binding("n", "new_selected", "new"),
+        Binding("x", "archive_selected", "archive"),
+        Binding("z", "toggle_archived", "archived"),
     ]
 
     def __init__(
         self,
         cwd: str,
         root: Path = DEFAULT_ROOT,
-        window_24h: bool = False,
+        window_24h: bool = True,
         all_projects: bool = True,
         style: str = "flow",
         theme: str = "classic",
+        sessions: dict[str, Session] | None = None,
+        cache: ScanCache | None = None,
+        state: ArvreState | None = None,
+        state_path: Path | None = None,
+        show_archived: bool = False,
     ) -> None:
         super().__init__()
         self.cwd = cwd
@@ -92,8 +108,12 @@ class ArvreApp(App):
         self.all_projects = all_projects
         self.style_name = style
         self.theme_name = theme
+        self.show_archived = show_archived
         self.sessions: dict[str, Session] = {}
-        self._cache: dict = {}
+        self._cache = cache if cache is not None else ScanCache()
+        self._initial_sessions = sessions
+        self.state = state if state is not None else ArvreState()
+        self.state_path = state_path
 
     @property
     def palette(self) -> Theme:
@@ -106,7 +126,17 @@ class ArvreApp(App):
         yield Static(id="status")
 
     def on_mount(self) -> None:
-        self.load()
+        if self._initial_sessions is not None:
+            # Already scanned (with the loading indicator) before Textual
+            # took the terminal; re-scanning here would just hit a warm cache,
+            # but there's no reason to pay even that.
+            self.sessions = self._initial_sessions
+            link_forks(self.sessions)
+            self.refresh_rows()
+        else:
+            self.load()
+        self.state.mark_seen(set(self.sessions))
+        self.state.save(self.state_path)
         self.query_one(GraphView).focus()
 
     # --- data -------------------------------------------------------------
@@ -119,11 +149,15 @@ class ArvreApp(App):
     def refresh_rows(self) -> None:
         now = datetime.now(timezone.utc)
         visible = visible_ids(self.sessions, now, self.window_24h, self.all_projects, self.cwd)
-        rows = build_rows(self.sessions, tree_members(self.sessions, visible))
+        members = tree_members(self.sessions, visible)
+        archived_ids = self.state.archived_ids()
+        shown = members if self.show_archived else members - archived_ids
+        rows = build_rows(self.sessions, shown, frozenset(archived_ids))
         self.query_one(GraphView).set_data(self.sessions, rows, now, self.style_name, self.palette)
-        self.update_status(len(visible))
+        hidden = 0 if self.show_archived else len(members & archived_ids)
+        self.update_status(len(visible), hidden)
 
-    def update_status(self, count: int) -> None:
+    def update_status(self, count: int, hidden_archived: int) -> None:
         accent = self.palette.accent
         scope = "all projects" if self.all_projects else "this dir"
         window = "24h" if self.window_24h else "all time"
@@ -133,6 +167,10 @@ class ArvreApp(App):
             ("p", scope),
             ("v", self.style_name),
             ("t", f"theme {self.theme_name}"),
+            ("f", "fork"),
+            ("n", "new"),
+            ("x", "archive"),
+            ("z", "archived shown" if self.show_archived else "archived hidden"),
         ]:
             line.append(f"{key} ", style=accent)
             line.append(f"{label}  ")
@@ -141,13 +179,15 @@ class ArvreApp(App):
         line.append("q ", style=accent)
         line.append("quit  ")
         line.append(f"· {count} sessions")
+        if hidden_archived:
+            line.append(f"  · {hidden_archived} archived hidden")
         self.query_one("#status", Static).update(line)
         self.update_detail(self.query_one(GraphView).selected_id)
 
     def update_detail(self, sid: str | None) -> None:
         detail = self.query_one("#detail", Static)
         if sid is None:
-            detail.update(Text("No sessions match the filters. Press a / p to widen them."))
+            detail.update(Text("No sessions match the filters. Press a / p / z to widen them."))
             return
         theme = self.palette
         s = self.sessions[sid]
@@ -155,6 +195,8 @@ class ArvreApp(App):
         children = ", ".join(self.sessions[c].name for c in s.child_ids) or "none"
         text = Text()
         text.append(s.name, style=theme.style("name"))
+        if self.state.is_archived(sid):
+            text.append("  (archived)", style=theme.style("meta"))
         text.append(f"\nid {s.id}  ·  branch {s.branch or '-'}  ·  {s.cwd}", style=theme.style("meta"))
         text.append("\nparent: ", style=theme.style("meta"))
         text.append(parent)
@@ -171,7 +213,8 @@ class ArvreApp(App):
         if event.session_id is None:
             return
         session = self.sessions[event.session_id]
-        self.push_screen(ActionModal(session), callback=partial(self.run_choice, session))
+        archived = self.state.is_archived(session.id)
+        self.push_screen(ActionModal(session, archived), callback=partial(self.run_choice, session))
 
     # --- actions ------------------------------------------------------------
 
@@ -194,23 +237,85 @@ class ArvreApp(App):
         self.theme_name = THEME_ORDER[(THEME_ORDER.index(self.theme_name) + 1) % len(THEME_ORDER)]
         self.refresh_rows()
 
+    def action_toggle_archived(self) -> None:
+        self.show_archived = not self.show_archived
+        self.refresh_rows()
+
+    def action_archive_selected(self) -> None:
+        sid = self.query_one(GraphView).selected_id
+        if sid is not None:
+            self._toggle_archive(sid)
+
+    def action_fork_selected(self) -> None:
+        sid = self.query_one(GraphView).selected_id
+        if sid is not None:
+            self.fork_session(self.sessions[sid])
+
+    def action_new_selected(self) -> None:
+        sid = self.query_one(GraphView).selected_id
+        if sid is not None:
+            self.new_session(self.sessions[sid])
+
     def run_choice(self, session: Session, choice: str | None) -> None:
         if choice == "open":
             self.open_here(session)
+        elif choice == "fork":
+            self.fork_session(session)
+        elif choice == "new":
+            self.new_session(session)
+        elif choice == "archive":
+            self._toggle_archive(session.id)
         elif choice == "copy":
             self.copy_command(session)
 
+    def _toggle_archive(self, sid: str) -> None:
+        now_archived = self.state.toggle_archived(sid)
+        self.state.save(self.state_path)
+        self.notify(f"{'Archived' if now_archived else 'Unarchived'}: {self.sessions[sid].name}")
+        self.refresh_rows()
+
+    def _claude_available(self) -> bool:
+        if shutil.which("claude"):
+            return True
+        self.notify("`claude` was not found on PATH.", severity="error")
+        return False
+
+    def _dir_exists(self, cwd: str) -> bool:
+        if os.path.isdir(cwd):
+            return True
+        self.notify(f"Directory no longer exists: {cwd}", severity="error")
+        return False
+
+    def _run_claude(self, argv: list[str], cwd: str) -> None:
+        # Its own method so tests can replace it without a real terminal to
+        # suspend into (Textual's test driver doesn't support App.suspend()).
+        with self.suspend():
+            subprocess.run(argv, cwd=cwd, check=False)
+
     def open_here(self, session: Session) -> None:
-        if not os.path.isdir(session.cwd):
-            self.notify(f"Directory no longer exists: {session.cwd}", severity="error")
+        if not (self._dir_exists(session.cwd) and self._claude_available()):
             return
-        try:
-            with self.suspend():
-                subprocess.run(["claude", "--resume", session.id], cwd=session.cwd, check=False)
-        except FileNotFoundError:
-            self.notify("`claude` was not found on PATH.", severity="error")
-            return
+        self._run_claude(resume_argv(session), session.cwd)
         self.load()
+
+    def fork_session(self, session: Session) -> None:
+        if not (self._dir_exists(session.cwd) and self._claude_available()):
+            return
+        new_id = new_session_id()
+        self._run_claude(fork_argv(session, new_id), session.cwd)
+        self._reload_and_select(new_id)
+
+    def new_session(self, session: Session) -> None:
+        if not (self._dir_exists(session.cwd) and self._claude_available()):
+            return
+        new_id = new_session_id()
+        self._run_claude(new_session_argv(new_id), session.cwd)
+        self._reload_and_select(new_id)
+
+    def _reload_and_select(self, session_id: str) -> None:
+        self.load()
+        if not self.query_one(GraphView).select_id(session_id):
+            self.notify("The new session has no messages yet, so it isn't shown. Press r to check again later.")
 
     def copy_command(self, session: Session) -> None:
         command = resume_command(session)
