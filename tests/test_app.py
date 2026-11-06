@@ -173,6 +173,7 @@ async def test_fork_action_runs_the_right_argv_and_selects_the_result(projects_r
         # The fixture's CWD ("/Users/me/project") is synthetic and doesn't
         # exist on the machine running the tests; only _run_claude is faked.
         monkeypatch.setattr(app, "_dir_exists", lambda cwd: True)
+        monkeypatch.setattr(app, "_claude_available", lambda: True)  # CI runners don't have claude installed
         graph = app.query_one(GraphView)
         graph.select_id(ROOT)
         await pilot.pause()
@@ -204,6 +205,7 @@ async def test_new_session_action_starts_in_the_selected_nodes_directory(project
         await pilot.pause()
         monkeypatch.setattr(app, "_run_claude", fake_run)
         monkeypatch.setattr(app, "_dir_exists", lambda cwd: True)
+        monkeypatch.setattr(app, "_claude_available", lambda: True)  # CI runners don't have claude installed
         graph = app.query_one(GraphView)
         graph.select_id(FORK)
         await pilot.pause()
@@ -228,6 +230,7 @@ async def test_fork_notifies_instead_of_selecting_when_the_new_session_has_no_me
         await pilot.pause()
         monkeypatch.setattr(app, "_run_claude", lambda argv, cwd: None)  # claude ran but wrote nothing
         monkeypatch.setattr(app, "_dir_exists", lambda cwd: True)
+        monkeypatch.setattr(app, "_claude_available", lambda: True)  # CI runners don't have claude installed
         graph = app.query_one(GraphView)
         graph.select_id(ROOT)
         await pilot.pause()
