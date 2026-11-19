@@ -40,8 +40,13 @@ class SessionState:
 
 
 class ArvreState:
-    def __init__(self, sessions: dict[str, SessionState] | None = None) -> None:
+    def __init__(
+        self, sessions: dict[str, SessionState] | None = None, settings: dict[str, str] | None = None
+    ) -> None:
         self._sessions: dict[str, SessionState] = sessions or {}
+        # UI choices remembered between runs (so far just "launch_target").
+        # Added without a version bump: older arvre ignores the key.
+        self._settings: dict[str, str] = settings or {}
         self.dirty = False
 
     @classmethod
@@ -60,7 +65,10 @@ class ArvreState:
             sid: SessionState(entry.get("archived_at"), entry.get("last_seen", ""))
             for sid, entry in raw.get("sessions", {}).items()
         }
-        return cls(sessions)
+        settings = raw.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        return cls(sessions, {k: v for k, v in settings.items() if isinstance(v, str)})
 
     def save(self, path: Path | None = None) -> None:
         if not self.dirty:
@@ -71,12 +79,23 @@ class ArvreState:
             "sessions": {
                 sid: {"archived_at": s.archived_at, "last_seen": s.last_seen} for sid, s in self._sessions.items()
             },
+            "settings": self._settings,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         os.replace(tmp, path)
         self.dirty = False
+
+    @property
+    def launch_target(self) -> str | None:
+        return self._settings.get("launch_target")
+
+    @launch_target.setter
+    def launch_target(self, value: str) -> None:
+        if self._settings.get("launch_target") != value:
+            self._settings["launch_target"] = value
+            self.dirty = True
 
     def is_archived(self, session_id: str) -> bool:
         entry = self._sessions.get(session_id)

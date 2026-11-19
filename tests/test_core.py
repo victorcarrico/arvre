@@ -148,6 +148,18 @@ def test_build_rows_marks_archived_rows_even_when_shown_anyway(projects_root):
     assert "archived" in label
 
 
+def test_running_rows_get_a_marker_in_both_styles(projects_root):
+    sessions = load(projects_root)
+    rows = build_rows(sessions, {ROOT, FORK}, running=frozenset({FORK}))
+    fork_row = next(r for r in rows if r.session.id == FORK)
+    root_row = next(r for r in rows if r.session.id == ROOT)
+    assert fork_row.running and not root_row.running
+    assert "▶" in row_label(fork_row, sessions, NOW) and "running" in row_label(fork_row, sessions, NOW)
+    assert "running" not in row_label(root_row, sessions, NOW)
+    boxes = flow_layout(rows).boxes
+    assert boxes[FORK].running and not boxes[ROOT].running
+
+
 def test_inherited_name_marker_shown_only_when_names_match(projects_root):
     sessions = load(projects_root)
     assert inherited_name(sessions[FORK], sessions) is False  # "try the other approach" != "Auth refactor"

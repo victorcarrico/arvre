@@ -19,6 +19,10 @@ def make_app(projects_root, **kwargs):
     # Isolates any archive-state write a test triggers to this run's tmp_path,
     # never the real ~/.local/share/arvre/state.json.
     kwargs.setdefault("state_path", projects_root / "state.json")
+    # Deterministic whether or not the test run itself is inside tmux.
+    kwargs.setdefault("in_tmux", False)
+    # No background polling; tests call app.poll() when they want one.
+    kwargs.setdefault("poll_seconds", None)
     return ArvreApp(cwd=CWD, root=projects_root, **kwargs)
 
 
@@ -86,6 +90,18 @@ async def test_enter_opens_action_modal_and_escape_closes(projects_root):
         await pilot.press("escape")
         await pilot.pause()
         assert not isinstance(app.screen, ActionModal)
+        # Escape in the modal only closes it; it must not also quit the app.
+        assert app.is_running
+
+
+@pytest.mark.asyncio
+async def test_escape_quits_from_main_screen(projects_root):
+    app = make_app(projects_root)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.is_running
 
 
 @pytest.mark.asyncio
@@ -350,3 +366,190 @@ async def test_navigating_down_scrolls_the_view(projects_root, style):
         else:
             top, bottom = graph._index, graph._index + 1
         assert container.scroll_y <= top and bottom <= container.scroll_y + container.size.height
+
+
+def fake_launch_env(app, monkeypatch):
+    monkeypatch.setattr(app, "_dir_exists", lambda cwd: True)
+    monkeypatch.setattr(app, "_claude_available", lambda: True)
+    ran_here = []
+    tmux_calls = []
+    monkeypatch.setattr(app, "_run_claude", lambda argv, cwd: ran_here.append(argv))
+    monkeypatch.setattr(app, "_run_tmux", lambda argv: tmux_calls.append(argv) or True)
+    return ran_here, tmux_calls
+
+
+@pytest.mark.asyncio
+async def test_o_cycles_launch_targets_inside_tmux(projects_root):
+    app = make_app(projects_root, in_tmux=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.launch_target == "here"
+        for expected in ["window", "pane", "here"]:
+            await pilot.press("o")
+            await pilot.pause()
+            assert app.launch_target == expected
+
+
+@pytest.mark.asyncio
+async def test_outside_tmux_launch_target_stays_here(projects_root):
+    app = make_app(projects_root, launch_target="window", in_tmux=False)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.launch_target == "here"
+        await pilot.press("o")
+        await pilot.pause()
+        assert app.launch_target == "here"
+
+
+@pytest.mark.asyncio
+async def test_fork_in_tmux_window_hands_the_command_to_tmux(projects_root, monkeypatch):
+    app = make_app(projects_root, launch_target="window", in_tmux=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ran_here, tmux_calls = fake_launch_env(app, monkeypatch)
+        app.query_one(GraphView).select_id(ROOT)
+        await pilot.pause()
+        await pilot.press("f")
+        await pilot.pause()
+        assert ran_here == []
+        assert len(tmux_calls) == 1
+        argv = tmux_calls[0]
+        assert argv[:4] == ["tmux", "new-window", "-c", CWD]
+        assert argv[-1].startswith(f"claude --resume {ROOT} --fork-session --session-id ")
+        assert app.is_running
+
+
+@pytest.mark.asyncio
+async def test_open_in_tmux_pane_splits_the_window(projects_root, monkeypatch):
+    app = make_app(projects_root, launch_target="pane", in_tmux=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ran_here, tmux_calls = fake_launch_env(app, monkeypatch)
+        app.open_here(app.sessions[ROOT])
+        await pilot.pause()
+        assert ran_here == []
+        assert tmux_calls == [["tmux", "split-window", "-h", "-c", CWD, f"claude --resume {ROOT}"]]
+
+
+def running_here(session_id, pane=None):
+    from arvre.running import RunningSession
+
+    return {session_id: RunningSession(session_id, 4242, CWD, "idle", pane)}
+
+
+@pytest.mark.asyncio
+async def test_open_switches_to_the_running_tmux_pane_instead_of_starting_a_copy(projects_root, monkeypatch):
+    app = make_app(projects_root, in_tmux=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ran_here, tmux_calls = fake_launch_env(app, monkeypatch)
+        monkeypatch.setattr(app, "fetch_running", lambda: running_here(ROOT, "%7"))
+        app.open_here(app.sessions[ROOT])
+        await pilot.pause()
+        assert ran_here == []
+        assert tmux_calls == [["tmux", "select-window", "-t", "%7", ";", "select-pane", "-t", "%7", ";",
+                               "switch-client", "-t", "%7"]]
+
+
+@pytest.mark.asyncio
+async def test_open_refuses_a_second_copy_when_running_outside_tmux(projects_root, monkeypatch):
+    app = make_app(projects_root)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        ran_here, tmux_calls = fake_launch_env(app, monkeypatch)
+        monkeypatch.setattr(app, "fetch_running", lambda: running_here(ROOT))
+        app.open_here(app.sessions[ROOT])
+        await pilot.pause()
+        assert ran_here == [] and tmux_calls == []
+
+
+@pytest.mark.asyncio
+async def test_poll_marks_running_sessions_in_the_graph(projects_root, monkeypatch):
+    app = make_app(projects_root)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert "running" not in app.query_one(GraphView).plain_text()
+        monkeypatch.setattr(app, "fetch_running", lambda: running_here(FORK))
+        app.poll()
+        await pilot.pause()
+        assert "running" in app.query_one(GraphView).plain_text()
+        monkeypatch.setattr(app, "fetch_running", lambda: {})
+        app.poll()
+        await pilot.pause()
+        assert "running" not in app.query_one(GraphView).plain_text()
+
+
+@pytest.mark.asyncio
+async def test_action_menu_offers_to_go_to_a_running_session(projects_root, monkeypatch):
+    app = make_app(projects_root, in_tmux=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        monkeypatch.setattr(app, "fetch_running", lambda: running_here(ROOT, "%7"))
+        app.poll()
+        app.query_one(GraphView).select_id(ROOT)
+        await pilot.press("enter")
+        await pilot.pause()
+        first = app.screen.query_one(OptionList).get_option_at_index(0)
+        assert "%7" in str(first.prompt)
+
+
+async def fork_into_tmux(app, pilot, monkeypatch):
+    _, tmux_calls = fake_launch_env(app, monkeypatch)
+    app.query_one(GraphView).select_id(ROOT)
+    await pilot.pause()
+    await pilot.press("f")
+    await pilot.pause()
+    shell_command = tmux_calls[0][-1]
+    return shell_command.split("--session-id ")[1]
+
+
+@pytest.mark.asyncio
+async def test_session_started_in_tmux_is_selected_once_it_has_messages(projects_root, monkeypatch):
+    app = make_app(projects_root, launch_target="window", in_tmux=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        new_id = await fork_into_tmux(app, pilot, monkeypatch)
+        assert app.awaiting is not None
+
+        app.poll()  # nothing written yet
+        assert app.awaiting is not None
+
+        write_session(projects_root, new_id, [message("t1", 0.0), message("t2", 0.0, kind="assistant")])
+        app.poll()
+        await pilot.pause()
+        assert app.awaiting is None
+        assert app.query_one(GraphView).selected_id == new_id
+
+
+@pytest.mark.asyncio
+async def test_session_started_in_tmux_does_not_steal_a_moved_selection(projects_root, monkeypatch):
+    app = make_app(projects_root, launch_target="window", in_tmux=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        new_id = await fork_into_tmux(app, pilot, monkeypatch)
+        app.query_one(GraphView).select_id(FORK)  # the user moved on meanwhile
+        write_session(projects_root, new_id, [message("t1", 0.0), message("t2", 0.0, kind="assistant")])
+        app.poll()
+        await pilot.pause()
+        assert app.awaiting is None
+        assert app.query_one(GraphView).selected_id == FORK
+        assert new_id in app.sessions
+
+
+@pytest.mark.asyncio
+async def test_o_choice_is_saved_and_used_next_time(projects_root):
+    app = make_app(projects_root, in_tmux=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("o")
+        await pilot.pause()
+    from arvre.state import ArvreState
+
+    saved = ArvreState.load(projects_root / "state.json")
+    assert saved.launch_target == "window"
+    again = make_app(projects_root, in_tmux=True, state=saved)
+    assert again.launch_target == "window"
+    explicit = make_app(projects_root, in_tmux=True, state=saved, launch_target="pane")
+    assert explicit.launch_target == "pane"
+    outside = make_app(projects_root, in_tmux=False, state=saved)
+    assert outside.launch_target == "here"

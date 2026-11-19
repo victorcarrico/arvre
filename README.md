@@ -38,6 +38,7 @@ arvre --style compact      # start with the compact tree instead
 arvre --theme ocean        # start with a colour theme
 arvre --show-archived      # start with archived sessions visible too
 arvre --claude-dir ~/.claudeultra  # read sessions from another Claude config directory
+arvre --open-in window     # inside tmux: open / fork / new start in a new tmux window (or: pane)
 arvre --print              # print the tree as text and exit
 ```
 
@@ -58,13 +59,26 @@ Run `arvre --help` for all options.
 | `p` | Toggle this directory / all projects |
 | `v` | Toggle compact / flowchart style |
 | `t` | Cycle colour themes (`classic`, `ocean`, `forest`, `sunset`) |
+| `o` | Inside tmux: cycle where sessions open (this terminal, a new tmux window, a new tmux pane); remembered between runs |
 | `r` | Reload |
-| `q` | Quit |
+| `q` / `Esc` | Quit |
 
 The action menu offers the same actions as the keys above, plus:
 
 - **Open in this terminal**: runs `claude --resume <id>` in the session's directory, and returns to arvre when Claude exits.
 - **Copy command**: copies `cd '<dir>' && claude --resume <id>` to the clipboard, for pasting into another terminal.
+
+### Running sessions
+
+Sessions with a live `claude` process are marked `▶ … · running`, and the detail line says where (a tmux pane, or a pid) and whether Claude is idle or busy. The marks update every few seconds. **Open** on a running session never starts a second copy, because two Claude processes writing to one session would interleave its history. If the session is in a tmux pane arvre can reach, Open switches to that pane. Otherwise arvre tells you it is already open elsewhere. Fork and New are unaffected.
+
+arvre finds running sessions in the per-process records Claude Code writes to `<claude dir>/sessions/<pid>.json`. It reads only those `*.json` records, never the `*.key` files beside them. Like the session files, this format is undocumented and could change.
+
+### tmux
+
+When arvre runs inside tmux, Open, Fork and New can start Claude in a new tmux window (named after the session) or in a new pane split beside arvre, instead of taking over arvre's terminal. arvre stays open meanwhile. A forked or new session is selected automatically once it has messages, unless you have moved the selection in the meantime.
+
+Press `o` to cycle the target. arvre remembers the choice for next time. `--open-in here|window|pane` (or `ARVRE_OPEN_IN`) overrides the remembered choice. Outside tmux, sessions always open in this terminal.
 
 ## How forks are detected
 
