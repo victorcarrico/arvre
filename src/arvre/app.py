@@ -6,6 +6,8 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -19,14 +21,59 @@ from textual.widgets import Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from arvre.cache import ScanCache
-from arvre.commands import fork_argv, new_session_argv, new_session_id, resume_argv, resume_command
+from arvre.commands import (
+    LAUNCH_TARGETS,
+    fork_argv,
+    new_session_argv,
+    new_session_id,
+    resume_argv,
+    resume_command,
+    tmux_argv,
+    tmux_window_name,
+)
 from arvre.config import claude_env
 from arvre.forks import link_forks
 from arvre.graph_view import GraphView
 from arvre.layout import build_rows, tree_members, visible_ids
+from arvre.running import RunningSession, running_sessions, switch_to_pane_argv
 from arvre.scanner import DEFAULT_ROOT, Session, discover
 from arvre.state import ArvreState
 from arvre.themes import THEME_ORDER, THEMES, Theme
+
+
+LAUNCH_TARGET_PHRASES = {
+    "here": "in this terminal",
+    "window": "in a new tmux window",
+    "pane": "in a new tmux pane",
+}
+
+
+# How often to look for running claude processes and for sessions started in tmux.
+POLL_SECONDS = 3.0
+# Stop waiting for a session started in tmux to show up after this long.
+AWAIT_SECONDS = 30 * 60
+
+
+def inside_tmux() -> bool:
+    return bool(os.environ.get("TMUX")) and shutil.which("tmux") is not None
+
+
+@dataclass
+class AwaitedSession:
+    """A fork or new session started in tmux, which arvre selects once it has messages."""
+
+    session_id: str
+    launched_from: str  # the selection at launch; only auto-select if it hasn't moved
+    deadline: float
+    file_size: int = -1
+
+
+def open_label(running: RunningSession | None, in_tmux: bool, where: str) -> str:
+    if running is None:
+        return f"Open {where}"
+    if running.tmux_pane and in_tmux:
+        return f"Go to it (already running in tmux pane {running.tmux_pane})"
+    return f"Already open in another terminal (pid {running.pid})"
 
 
 class ActionModal(ModalScreen[str | None]):
@@ -35,19 +82,30 @@ class ActionModal(ModalScreen[str | None]):
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, session: Session, archived: bool) -> None:
+    def __init__(
+        self,
+        session: Session,
+        archived: bool,
+        launch_target: str = "here",
+        running: RunningSession | None = None,
+        in_tmux: bool = False,
+    ) -> None:
         super().__init__()
         self.session = session
         self.archived = archived
+        self.launch_target = launch_target
+        self.running = running
+        self.in_tmux = in_tmux
 
     def compose(self) -> ComposeResult:
+        where = LAUNCH_TARGET_PHRASES[self.launch_target]
         with Vertical(id="modal"):
             yield Label(Text(self.session.name, style="bold"), id="modal-title")
             yield Static(f"{self.session.id}\n{self.session.cwd}", id="modal-meta")
             yield OptionList(
-                Option("Open in this terminal", id="open"),
-                Option("Fork this session", id="fork"),
-                Option("New session here", id="new"),
+                Option(open_label(self.running, self.in_tmux, where), id="open"),
+                Option(f"Fork this session {where}", id="fork"),
+                Option(f"New session in this directory {where}", id="new"),
                 Option("Unarchive" if self.archived else "Archive", id="archive"),
                 Option("Copy command", id="copy"),
                 id="modal-actions",
@@ -76,7 +134,7 @@ class ArvreApp(App):
     #modal-meta, #modal-command { color: $text-muted; }
     """
     BINDINGS = [
-        Binding("q", "quit", "Quit"),
+        Binding("q,escape", "quit", "Quit"),
         Binding("r", "reload", "Reload"),
         Binding("a", "toggle_window", "24h / all"),
         Binding("p", "toggle_scope", "this dir / all"),
@@ -86,6 +144,7 @@ class ArvreApp(App):
         Binding("n", "new_selected", "new"),
         Binding("x", "archive_selected", "archive"),
         Binding("z", "toggle_archived", "archived"),
+        Binding("o", "cycle_launch_target", "open in"),
     ]
 
     def __init__(
@@ -102,8 +161,24 @@ class ArvreApp(App):
         state_path: Path | None = None,
         show_archived: bool = False,
         claude_dir: Path | None = None,
+        launch_target: str | None = None,
+        in_tmux: bool | None = None,
+        poll_seconds: float | None = POLL_SECONDS,
     ) -> None:
         super().__init__()
+        self.state = state if state is not None else ArvreState()
+        self.state_path = state_path
+        self.in_tmux = inside_tmux() if in_tmux is None else in_tmux
+        # An explicit choice (flag or $ARVRE_OPEN_IN) wins over the one saved by `o`.
+        chosen = launch_target or self.state.launch_target or "here"
+        if chosen not in LAUNCH_TARGETS:
+            chosen = "here"
+        # Outside tmux there's nowhere else to open, so stay in this terminal
+        # (without overwriting the saved choice).
+        self.launch_target = chosen if self.in_tmux else "here"
+        self.poll_seconds = poll_seconds
+        self.running: dict[str, RunningSession] = {}
+        self.awaiting: AwaitedSession | None = None
         self.cwd = cwd
         self.root = root
         self.claude_dir = claude_dir
@@ -115,8 +190,6 @@ class ArvreApp(App):
         self.sessions: dict[str, Session] = {}
         self._cache = cache if cache is not None else ScanCache()
         self._initial_sessions = sessions
-        self.state = state if state is not None else ArvreState()
-        self.state_path = state_path
 
     @property
     def palette(self) -> Theme:
@@ -129,6 +202,7 @@ class ArvreApp(App):
         yield Static(id="status")
 
     def on_mount(self) -> None:
+        self.running = self.fetch_running()
         if self._initial_sessions is not None:
             # Already scanned (with the loading indicator) before Textual
             # took the terminal; re-scanning here would just hit a warm cache,
@@ -141,6 +215,8 @@ class ArvreApp(App):
         self.state.mark_seen(set(self.sessions))
         self.state.save(self.state_path)
         self.query_one(GraphView).focus()
+        if self.poll_seconds:
+            self.set_interval(self.poll_seconds, self.poll)
 
     # --- data -------------------------------------------------------------
 
@@ -155,10 +231,15 @@ class ArvreApp(App):
         members = tree_members(self.sessions, visible)
         archived_ids = self.state.archived_ids()
         shown = members if self.show_archived else members - archived_ids
-        rows = build_rows(self.sessions, shown, frozenset(archived_ids))
+        rows = build_rows(self.sessions, shown, frozenset(archived_ids), frozenset(self.running))
         self.query_one(GraphView).set_data(self.sessions, rows, now, self.style_name, self.palette)
         hidden = 0 if self.show_archived else len(members & archived_ids)
         self.update_status(len(visible), hidden)
+
+    def style_label(self) -> str:
+        if self.style_name == "flow" and self.query_one(GraphView).vertical:
+            return "flow (top-down)"
+        return self.style_name
 
     def update_status(self, count: int, hidden_archived: int) -> None:
         accent = self.palette.accent
@@ -168,18 +249,19 @@ class ArvreApp(App):
         for key, label in [
             ("a", window),
             ("p", scope),
-            ("v", self.style_name),
+            ("v", self.style_label()),
             ("t", f"theme {self.theme_name}"),
             ("f", "fork"),
             ("n", "new"),
             ("x", "archive"),
             ("z", "archived shown" if self.show_archived else "archived hidden"),
+            *([("o", f"open in {self.launch_target}")] if self.in_tmux else []),
         ]:
             line.append(f"{key} ", style=accent)
             line.append(f"{label}  ")
         line.append("r ", style=accent)
         line.append("reload  ")
-        line.append("q ", style=accent)
+        line.append("q/esc ", style=accent)
         line.append("quit  ")
         line.append(f"· {count} sessions")
         if hidden_archived:
@@ -200,6 +282,11 @@ class ArvreApp(App):
         text.append(s.name, style=theme.style("name"))
         if self.state.is_archived(sid):
             text.append("  (archived)", style=theme.style("meta"))
+        running = self.running.get(sid)
+        if running is not None:
+            where = f"tmux pane {running.tmux_pane}" if running.tmux_pane else f"pid {running.pid}"
+            status = f", {running.status}" if running.status else ""
+            text.append(f"  (running in {where}{status})", style=theme.style("meta"))
         text.append(f"\nid {s.id}  ·  branch {s.branch or '-'}  ·  {s.cwd}", style=theme.style("meta"))
         text.append("\nparent: ", style=theme.style("meta"))
         text.append(parent)
@@ -209,6 +296,13 @@ class ArvreApp(App):
 
     # --- events -------------------------------------------------------------
 
+    def on_resize(self) -> None:
+        # The flowchart picks left-to-right or top-down by the screen's width.
+        # App.size only reflects the new width once this event is handled, so
+        # lay out again after the next refresh rather than right now.
+        if self.sessions:
+            self.call_after_refresh(self.refresh_rows)
+
     def on_graph_view_highlighted(self, event: GraphView.Highlighted) -> None:
         self.update_detail(event.session_id)
 
@@ -217,7 +311,8 @@ class ArvreApp(App):
             return
         session = self.sessions[event.session_id]
         archived = self.state.is_archived(session.id)
-        self.push_screen(ActionModal(session, archived), callback=partial(self.run_choice, session))
+        modal = ActionModal(session, archived, self.launch_target, self.running.get(session.id), self.in_tmux)
+        self.push_screen(modal, callback=partial(self.run_choice, session))
 
     # --- actions ------------------------------------------------------------
 
@@ -242,6 +337,17 @@ class ArvreApp(App):
 
     def action_toggle_archived(self) -> None:
         self.show_archived = not self.show_archived
+        self.refresh_rows()
+
+    def action_cycle_launch_target(self) -> None:
+        if not self.in_tmux:
+            self.notify("Not running inside tmux, so sessions open in this terminal.", severity="warning")
+            return
+        index = LAUNCH_TARGETS.index(self.launch_target)
+        self.launch_target = LAUNCH_TARGETS[(index + 1) % len(LAUNCH_TARGETS)]
+        self.state.launch_target = self.launch_target
+        self.state.save(self.state_path)
+        self.notify(f"Sessions now open {LAUNCH_TARGET_PHRASES[self.launch_target]}.")
         self.refresh_rows()
 
     def action_archive_selected(self) -> None:
@@ -295,25 +401,113 @@ class ArvreApp(App):
         with self.suspend():
             subprocess.run(argv, cwd=cwd, env=claude_env(self.claude_dir), check=False)
 
+    def _run_tmux(self, argv: list[str]) -> bool:
+        # Its own method so tests can replace it without a real tmux server.
+        result = subprocess.run(argv, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            self.notify(f"tmux failed: {result.stderr.strip() or result.returncode}", severity="error")
+            return False
+        return True
+
+    def _launch(self, argv: list[str], session: Session, name: str) -> str | None:
+        """Run claude where the launch target says. Returns "here" once it has
+        run in this terminal and exited, "tmux" once tmux has started it, or
+        None if tmux failed."""
+        if self.launch_target == "here":
+            self._run_claude(argv, session.cwd)
+            return "here"
+        command = tmux_argv(self.launch_target, argv, session.cwd, tmux_window_name(name), self.claude_dir)
+        return "tmux" if self._run_tmux(command) else None
+
     def open_here(self, session: Session) -> None:
+        # Re-check rather than trust the last poll: a second claude on the same
+        # session would interleave writes to one file.
+        self.running = self.fetch_running()
+        running = self.running.get(session.id)
+        if running is not None:
+            self._go_to_running(running)
+            return
         if not (self._dir_exists(session.cwd) and self._claude_available()):
             return
-        self._run_claude(resume_argv(session), session.cwd)
-        self.load()
+        where = self._launch(resume_argv(session), session, session.name)
+        if where == "here":
+            self.load()
+        elif where == "tmux":
+            self.notify(f"Opened {LAUNCH_TARGET_PHRASES[self.launch_target]}.")
+            self.refresh_rows()
+
+    def _go_to_running(self, running: RunningSession) -> None:
+        if running.tmux_pane and self.in_tmux:
+            if self._run_tmux(switch_to_pane_argv(running.tmux_pane)):
+                self.notify(f"Already running, so switched to tmux pane {running.tmux_pane}.")
+            return
+        self.notify(
+            f"Already open in another terminal (pid {running.pid}), so not opening a second copy.",
+            severity="warning",
+        )
 
     def fork_session(self, session: Session) -> None:
         if not (self._dir_exists(session.cwd) and self._claude_available()):
             return
         new_id = new_session_id()
-        self._run_claude(fork_argv(session, new_id), session.cwd)
-        self._reload_and_select(new_id)
+        self._after_start(new_id, session, self._launch(fork_argv(session, new_id), session, f"fork: {session.name}"))
 
     def new_session(self, session: Session) -> None:
         if not (self._dir_exists(session.cwd) and self._claude_available()):
             return
         new_id = new_session_id()
-        self._run_claude(new_session_argv(new_id), session.cwd)
-        self._reload_and_select(new_id)
+        name = "new: " + os.path.basename(session.cwd.rstrip("/"))
+        self._after_start(new_id, session, self._launch(new_session_argv(new_id), session, name))
+
+    def _after_start(self, new_id: str, origin: Session, where: str | None) -> None:
+        if where == "here":
+            self._reload_and_select(new_id)
+        elif where == "tmux":
+            self.awaiting = AwaitedSession(new_id, origin.id, time.monotonic() + AWAIT_SECONDS)
+            self.notify(
+                f"Started {LAUNCH_TARGET_PHRASES[self.launch_target]}. "
+                "It will be selected here once it has messages."
+            )
+
+    # --- polling ------------------------------------------------------------
+
+    def fetch_running(self) -> dict[str, RunningSession]:
+        # The projects root is <claude dir>/projects, so this is <claude dir>.
+        return running_sessions(self.root.parent, self.in_tmux)
+
+    def poll(self) -> None:
+        running = self.fetch_running()
+        changed = {k: v.tmux_pane for k, v in running.items()} != {k: v.tmux_pane for k, v in self.running.items()}
+        self.running = running
+        if self.awaiting is not None and self.check_awaiting():
+            return  # it reloaded, which redrew everything
+        if changed:
+            self.refresh_rows()
+
+    def check_awaiting(self) -> bool:
+        """Reload once the awaited session's file grows; select it once it has
+        messages. Returns True if it reloaded."""
+        awaited = self.awaiting
+        if time.monotonic() > awaited.deadline:
+            self.awaiting = None
+            return False
+        size = -1
+        for path in self.root.glob(f"*/{awaited.session_id}.jsonl"):
+            try:
+                size = max(size, path.stat().st_size)
+            except OSError:
+                pass
+        if size == awaited.file_size:
+            return False
+        awaited.file_size = size
+        self.load()
+        if awaited.session_id not in self.sessions:
+            return True  # no messages yet: keep waiting
+        self.awaiting = None
+        graph = self.query_one(GraphView)
+        if graph.selected_id == awaited.launched_from and graph.select_id(awaited.session_id):
+            self.notify(f"New session: {self.sessions[awaited.session_id].name}")
+        return True
 
     def _reload_and_select(self, session_id: str) -> None:
         self.load()

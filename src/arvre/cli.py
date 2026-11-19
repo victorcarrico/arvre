@@ -10,6 +10,7 @@ from pathlib import Path
 from arvre import __version__
 from arvre.app import ArvreApp
 from arvre.cache import ScanCache
+from arvre.commands import LAUNCH_TARGETS
 from arvre.config import projects_root, resolve_claude_dir
 from arvre.forks import link_forks
 from arvre.layout import build_rows, row_label, tree_members, visible_ids
@@ -51,8 +52,18 @@ def main(argv: list[str] | None = None) -> None:
         help="Claude Code config directory to read sessions from (default: $ARVRE_CLAUDE_DIR, "
         "then $CLAUDE_CONFIG_DIR, then ~/.claude)",
     )
+    parser.add_argument(
+        "--open-in",
+        choices=list(LAUNCH_TARGETS),
+        default=os.environ.get("ARVRE_OPEN_IN") or None,
+        help="where open / fork / new start claude: this terminal, a new tmux window, or a new tmux pane "
+        "(default: $ARVRE_OPEN_IN, then the last choice made with o, then here). "
+        "window and pane need arvre to run inside tmux",
+    )
     parser.add_argument("--print", dest="print_only", action="store_true", help="print the graph as text and exit")
     args = parser.parse_args(argv)
+    if args.open_in is not None and args.open_in not in LAUNCH_TARGETS:
+        parser.error(f"ARVRE_OPEN_IN must be one of {', '.join(LAUNCH_TARGETS)}, not {args.open_in!r}")
 
     cwd = os.path.realpath(args.dir)
     claude_dir = resolve_claude_dir(args.claude_dir)
@@ -83,6 +94,7 @@ def main(argv: list[str] | None = None) -> None:
             cache=cache,
             state=state,
             show_archived=args.show_archived,
+            launch_target=args.open_in,
         ).run()
     finally:
         if not args.no_cache:

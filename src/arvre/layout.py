@@ -17,6 +17,7 @@ class Row:
     prefix: str
     depth: int
     archived: bool = False
+    running: bool = False  # a live claude process has this session open
 
 
 def visible_ids(
@@ -67,6 +68,7 @@ def build_rows(
     sessions: dict[str, Session],
     shown: set[str],
     archived: frozenset[str] = frozenset(),
+    running: frozenset[str] = frozenset(),
 ) -> list[Row]:
     children: dict[str, list[str]] = defaultdict(list)
     roots: list[str] = []
@@ -83,7 +85,7 @@ def build_rows(
     rows: list[Row] = []
 
     def walk(sid: str, prefix: str, child_base: str, depth: int) -> None:
-        rows.append(Row(sessions[sid], prefix, depth, archived=sid in archived))
+        rows.append(Row(sessions[sid], prefix, depth, archived=sid in archived, running=sid in running))
         kids = newest_first(children[sid])
         for i, kid in enumerate(kids):
             last = i == len(kids) - 1
@@ -128,10 +130,12 @@ def row_segments(row: Row, sessions: dict[str, Session], now: datetime) -> list[
     if s.child_ids:
         count = len(s.child_ids)
         meta.append(f"{count} {'child' if count == 1 else 'children'}")
+    if row.running:
+        meta.append("running")
     if row.archived:
         meta.append("archived")
 
-    bullet = "○ " if row.archived else "● "
+    bullet = "▶ " if row.running else "○ " if row.archived else "● "
     segments = [(row.prefix, "connector"), (bullet, "bullet"), (s.name, "name")]
     if inherited_name(s, sessions):
         segments.append((" ⑂", "meta"))
