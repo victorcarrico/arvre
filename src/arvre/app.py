@@ -236,6 +236,11 @@ class ArvreApp(App):
         hidden = 0 if self.show_archived else len(members & archived_ids)
         self.update_status(len(visible), hidden)
 
+    def style_label(self) -> str:
+        if self.style_name == "flow" and self.query_one(GraphView).vertical:
+            return "flow (top-down)"
+        return self.style_name
+
     def update_status(self, count: int, hidden_archived: int) -> None:
         accent = self.palette.accent
         scope = "all projects" if self.all_projects else "this dir"
@@ -244,7 +249,7 @@ class ArvreApp(App):
         for key, label in [
             ("a", window),
             ("p", scope),
-            ("v", self.style_name),
+            ("v", self.style_label()),
             ("t", f"theme {self.theme_name}"),
             ("f", "fork"),
             ("n", "new"),
@@ -290,6 +295,13 @@ class ArvreApp(App):
         detail.update(text)
 
     # --- events -------------------------------------------------------------
+
+    def on_resize(self) -> None:
+        # The flowchart picks left-to-right or top-down by the screen's width.
+        # App.size only reflects the new width once this event is handled, so
+        # lay out again after the next refresh rather than right now.
+        if self.sessions:
+            self.call_after_refresh(self.refresh_rows)
 
     def on_graph_view_highlighted(self, event: GraphView.Highlighted) -> None:
         self.update_detail(event.session_id)

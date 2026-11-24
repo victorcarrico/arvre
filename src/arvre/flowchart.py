@@ -1,4 +1,4 @@
-"""Left-to-right flowchart rendering of a session tree."""
+"""Flowchart rendering of a session tree: left-to-right, or top-down for narrow screens."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ BOX_W = 28
 BOX_H = 4
 GAP_X = 6
 GAP_Y = 1
+# Top-down layout: how far each level is indented under its parent.
+INDENT = 4
 
 UP, DOWN, LEFT, RIGHT = 1, 2, 4, 8
 LINE_CHARS = {
@@ -54,6 +56,7 @@ class FlowLayout:
     box_rows: dict[int, list[Box]] = field(default_factory=dict)
     width: int = 0
     height: int = 0
+    vertical: bool = False  # top-down (children below their parent) rather than left-to-right
 
 
 def flow_layout(rows: list[Row]) -> FlowLayout:
@@ -112,6 +115,44 @@ def flow_layout(rows: list[Row]) -> FlowLayout:
             _vertical(layout.lines, bend_x, exit_y, enter_y)
             _horizontal(layout.lines, enter_y, bend_x, enter_x)
 
+    return layout
+
+
+def vertical_flow_layout(rows: list[Row]) -> FlowLayout:
+    """Top-down, for narrow screens: boxes in tree order, one per band, each
+    child indented under its parent. Width grows by INDENT per level instead
+    of a whole box, so deep fork chains still fit."""
+    if not rows:
+        return FlowLayout({}, vertical=True)
+    boxes: dict[str, Box] = {}
+    parent_at_depth: dict[int, str] = {}  # rows are in tree order, so the last box seen one level up is the parent
+    edges: list[tuple[str, str]] = []
+    for i, row in enumerate(rows):
+        sid = row.session.id
+        boxes[sid] = Box(sid, row.depth * INDENT, i * (BOX_H + GAP_Y), archived=row.archived, running=row.running)
+        parent_at_depth[row.depth] = sid
+        if row.depth > 0 and row.depth - 1 in parent_at_depth:
+            edges.append((parent_at_depth[row.depth - 1], sid))
+
+    layout = FlowLayout(
+        boxes=boxes,
+        width=max(box.x for box in boxes.values()) + BOX_W,
+        height=max(box.y for box in boxes.values()) + BOX_H,
+        vertical=True,
+    )
+    for box in boxes.values():
+        for dy in range(BOX_H):
+            layout.box_rows.setdefault(box.y + dy, []).append(box)
+
+    # A trunk drops from under the parent's left edge, then turns right into
+    # each child's name row. Later children's trunks pass beside earlier
+    # children's subtrees, which are always indented further, so nothing crosses.
+    for parent_id, child_id in edges:
+        parent, child = boxes[parent_id], boxes[child_id]
+        trunk_x = parent.x + INDENT // 2
+        enter_y = child.y + 1
+        _vertical(layout.lines, trunk_x, parent.y + BOX_H, enter_y)
+        _horizontal(layout.lines, enter_y, trunk_x, child.x - 1)
     return layout
 
 

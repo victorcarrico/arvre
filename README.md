@@ -48,7 +48,7 @@ Run `arvre --help` for all options.
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` (`k` / `j`) | Move. In compact style, through the tree. In flowchart style, to the next session at the same depth. |
+| `↑` / `↓` (`k` / `j`) | Move. In compact style and the top-down flowchart, through the tree. In the left-to-right flowchart, to the next session at the same depth. |
 | `←` / `→` (`h` / `l`) | Go to the parent / first child |
 | `Enter` | Open the action menu for the selected session (or click it twice) |
 | `f` | Fork the selected session |
@@ -57,7 +57,7 @@ Run `arvre --help` for all options.
 | `z` | Toggle whether archived sessions are shown |
 | `a` | Toggle last 24 hours / all time |
 | `p` | Toggle this directory / all projects |
-| `v` | Toggle compact / flowchart style |
+| `v` | Toggle compact / flowchart style. The flowchart reads left to right when it fits the terminal's width, and otherwise flows top-down with each fork indented under its parent, which suits tall, narrow screens. It reflows when the terminal is resized. |
 | `t` | Cycle colour themes (`classic`, `ocean`, `forest`, `sunset`) |
 | `o` | Inside tmux: cycle where sessions open (this terminal, a new tmux window, a new tmux pane); remembered between runs |
 | `r` | Reload |

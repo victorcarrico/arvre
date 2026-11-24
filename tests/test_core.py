@@ -3,7 +3,7 @@ from datetime import timedelta
 from conftest import CWD, NOW, message, write_session, write_title_sidecar
 
 from arvre.commands import resume_command
-from arvre.flowchart import BOX_H, BOX_W, flow_layout
+from arvre.flowchart import BOX_H, BOX_W, INDENT, flow_layout, vertical_flow_layout
 from arvre.forks import link_forks
 from arvre.layout import build_rows, format_age, inherited_name, row_label, tree_members, visible_ids
 from arvre.scanner import Session, discover
@@ -105,6 +105,30 @@ def test_flow_layout_places_children_to_the_right(projects_root):
     assert layout.height >= sibling.y + BOX_H
 
 
+def test_vertical_flow_layout_puts_children_below_and_indented(projects_root):
+    fork2 = "aaaaaaaa-0000-0000-0000-000000000009"
+    write_session(projects_root, fork2, [message("u1", 3.2), message("u2", 3.1, kind="assistant"), message("u8", 0.2)])
+    sessions = load(projects_root)
+    rows = build_rows(sessions, {ROOT, FORK, fork2})
+    layout = vertical_flow_layout(rows)
+    assert layout.vertical
+    boxes = [layout.boxes[row.session.id] for row in rows]
+    # One box per band, in tree order, each child indented one step under its parent.
+    assert [b.y for b in boxes] == [i * (BOX_H + 1) for i in range(3)]
+    assert [b.x for b in boxes] == [0, INDENT, INDENT]
+    assert layout.width == INDENT + BOX_W
+    # Far narrower than left-to-right for the same tree.
+    assert layout.width < flow_layout(rows).width
+    # The trunk turns into each child: ├ for the first, └ for the last.
+    trunk = INDENT // 2
+    assert layout.lines[boxes[1].y + 1][trunk] & 8  # RIGHT
+    assert layout.lines[boxes[2].y + 1][trunk] == 1 | 8  # UP | RIGHT: └
+
+
+def test_vertical_flow_layout_of_nothing_is_empty():
+    assert vertical_flow_layout([]).boxes == {}
+
+
 def test_format_age():
     assert format_age(NOW, NOW - timedelta(seconds=30)) == "just now"
     assert format_age(NOW, NOW - timedelta(minutes=5)) == "5m ago"
@@ -156,8 +180,8 @@ def test_running_rows_get_a_marker_in_both_styles(projects_root):
     assert fork_row.running and not root_row.running
     assert "▶" in row_label(fork_row, sessions, NOW) and "running" in row_label(fork_row, sessions, NOW)
     assert "running" not in row_label(root_row, sessions, NOW)
-    boxes = flow_layout(rows).boxes
-    assert boxes[FORK].running and not boxes[ROOT].running
+    for layout in (flow_layout(rows), vertical_flow_layout(rows)):
+        assert layout.boxes[FORK].running and not layout.boxes[ROOT].running
 
 
 def test_inherited_name_marker_shown_only_when_names_match(projects_root):

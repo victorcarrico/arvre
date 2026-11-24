@@ -13,7 +13,7 @@ from textual.message import Message
 from textual.strip import Strip
 from textual.widget import Widget
 
-from arvre.flowchart import BOX_H, BOX_W, FlowLayout, flow_layout, flow_row
+from arvre.flowchart import BOX_H, BOX_W, FlowLayout, flow_layout, flow_row, vertical_flow_layout
 from arvre.layout import Row, row_label, row_segments
 from arvre.scanner import Session
 from arvre.themes import THEMES, Theme
@@ -67,7 +67,7 @@ class GraphView(Widget, can_focus=True):
         self._index = next((i for i, r in enumerate(rows) if r.session.id == selected), 0)
 
         if style_name == "flow":
-            self._flow = flow_layout(rows)
+            self._flow = self._fitting_flow(rows)
             width, height = self._flow.width, self._flow.height
         else:
             self._flow = None
@@ -78,6 +78,25 @@ class GraphView(Widget, can_focus=True):
         self.styles.height = max(height, 1)
         self.refresh(layout=True)
         self.post_message(self.Highlighted(self.selected_id))
+
+    def _fitting_flow(self, rows: list[Row]) -> FlowLayout:
+        """Left-to-right when it fits the screen's width, otherwise top-down,
+        which is far narrower (a deep fork chain adds a few columns per level
+        instead of a whole box) and uses a tall screen's height instead."""
+        wide = flow_layout(rows)
+        if wide.width <= self.available_width():
+            return wide
+        tall = vertical_flow_layout(rows)
+        return tall if tall.width < wide.width else wide
+
+    def available_width(self) -> int:
+        # The graph scrolls inside a container as wide as the screen; leave
+        # room for its vertical scrollbar.
+        return max(self.app.size.width - 2, 1)
+
+    @property
+    def vertical(self) -> bool:
+        return self._flow is not None and self._flow.vertical
 
     @property
     def selected_id(self) -> str | None:
@@ -149,13 +168,14 @@ class GraphView(Widget, can_focus=True):
     # --- keyboard -----------------------------------------------------------
 
     def action_move(self, step: int) -> None:
-        if self._flow:
+        if self._flow and not self._flow.vertical:
             self._move_same_level(step)
         else:
             self._select(self._index + step)
 
     def _move_same_level(self, step: int) -> None:
-        """Flowchart: up/down step through sessions in the same column (same depth)."""
+        """Left-to-right flowchart: up/down step through sessions in the same column (same depth).
+        (Top-down boxes are already in tree order, so there up/down just step through them.)"""
         depth = self.rows[self._index].depth
         level = [i for i, row in enumerate(self.rows) if row.depth == depth]
         level.sort(key=lambda i: self._flow.boxes[self.rows[i].session.id].y)

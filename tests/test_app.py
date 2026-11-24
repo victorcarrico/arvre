@@ -553,3 +553,52 @@ async def test_o_choice_is_saved_and_used_next_time(projects_root):
     assert explicit.launch_target == "pane"
     outside = make_app(projects_root, in_tmux=False, state=saved)
     assert outside.launch_target == "here"
+
+
+@pytest.mark.asyncio
+async def test_flow_reflows_top_down_on_a_narrow_screen_and_back_when_widened(projects_root):
+    app = make_app(projects_root, style="flow")
+    async with app.run_test(size=(40, 60)) as pilot:
+        await pilot.pause()
+        graph = app.query_one(GraphView)
+        assert graph.vertical
+        assert "top-down" in str(app.query_one("#status", Static).render())
+        root, fork = graph._flow.boxes[ROOT], graph._flow.boxes[FORK]
+        assert fork.y > root.y and fork.x > root.x
+
+        await pilot.resize_terminal(120, 40)
+        await pilot.pause()
+        assert not graph.vertical
+        assert graph._flow.boxes[FORK].y <= graph._flow.boxes[ROOT].y + 1  # beside its parent again
+
+        await pilot.resize_terminal(40, 60)
+        await pilot.pause()
+        assert graph.vertical
+
+
+@pytest.mark.asyncio
+async def test_top_down_up_down_steps_through_boxes_in_order(projects_root):
+    app = make_app(projects_root, style="flow")
+    async with app.run_test(size=(40, 60)) as pilot:
+        await pilot.pause()
+        graph = app.query_one(GraphView)
+        graph.select_id(ROOT)
+        await pilot.press("down")
+        await pilot.pause()
+        assert graph.selected_id == FORK  # the child below it, unlike left-to-right
+        await pilot.press("up")
+        await pilot.pause()
+        assert graph.selected_id == ROOT
+
+
+@pytest.mark.asyncio
+async def test_click_on_top_down_box_selects_it(projects_root):
+    app = make_app(projects_root, style="flow")
+    async with app.run_test(size=(40, 60)) as pilot:
+        await pilot.pause()
+        graph = app.query_one(GraphView)
+        graph.select_id(ROOT)
+        box = graph._flow.boxes[FORK]
+        await pilot.click(GraphView, offset=(box.x + 2, box.y + 1))
+        await pilot.pause()
+        assert graph.selected_id == FORK
