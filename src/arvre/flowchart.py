@@ -42,6 +42,7 @@ class Box:
     x: int
     y: int
     archived: bool = False
+    running: bool = False
 
 
 @dataclass
@@ -81,9 +82,9 @@ def flow_layout(rows: list[Row]) -> FlowLayout:
         if row.depth == 0:
             place(row.session.id)
 
-    archived = {row.session.id: row.archived for row in rows}
+    by_id = {row.session.id: row for row in rows}
     boxes = {
-        sid: Box(sid, depth[sid] * (BOX_W + GAP_X), y, archived=archived.get(sid, False))
+        sid: Box(sid, depth[sid] * (BOX_W + GAP_X), y, archived=by_id[sid].archived, running=by_id[sid].running)
         for sid, y in ys.items()
     }
     if not boxes:
@@ -174,10 +175,14 @@ def _draw_box_row(
 ) -> None:
     inner = BOX_W - 2
     label = session.name + (" ⑂" if inherited else "")
-    if box.archived:
+    if box.running:
+        label = "▶ " + label
+    elif box.archived:
         label = "○ " + label
     name = _fit(label, inner - 2)
     stats_text = f"{format_age(now, session.last_ts)} · {_children(session)}"
+    if box.running:
+        stats_text += " · running"
     if box.archived:
         stats_text += " · archived"
     stats = _fit(stats_text, inner - 2)

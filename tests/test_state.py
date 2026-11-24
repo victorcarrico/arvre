@@ -84,3 +84,19 @@ def test_mark_seen_keeps_a_stale_entry_the_scan_still_reports():
 
 def test_cutoff_iso_is_in_the_past():
     assert _cutoff_iso(90) < datetime.now(timezone.utc).isoformat()
+
+
+def test_launch_target_round_trips_and_marks_dirty(tmp_path):
+    path = tmp_path / "state.json"
+    state = ArvreState()
+    assert state.launch_target is None
+    state.launch_target = "pane"
+    assert state.dirty
+    state.save(path)
+    assert ArvreState.load(path).launch_target == "pane"
+
+
+def test_state_file_without_settings_still_loads(tmp_path):
+    path = tmp_path / "state.json"
+    path.write_text('{"version": 1, "sessions": {}}', encoding="utf-8")
+    assert ArvreState.load(path).launch_target is None
